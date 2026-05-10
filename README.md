@@ -2,7 +2,7 @@
 
 **Chunk-level diff for RAG corpora.** Crawl a URL, hash each chunk, re-embed only what actually changed.
 
-[![asciicast](https://asciinema.org/a/1031316.svg)](https://asciinema.org/a/1031316)
+<a href="https://asciinema.org/a/1031316" target="_blank"><img src="https://asciinema.org/a/1031316.png" alt="frag demo — asciicast" width="800"/></a>
 
 ## Why
 
