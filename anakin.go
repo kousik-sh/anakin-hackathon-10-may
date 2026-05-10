@@ -89,7 +89,14 @@ func pollCrawl(ctx context.Context, hc *http.Client, apiKey, jobID string) (*pol
 	return &pr, nil
 }
 
-func crawl(ctx context.Context, apiKey, target string, maxPages int) ([]pageResult, error) {
+type crawlOutcome struct {
+	JobID          string
+	Pages          []pageResult
+	TotalPages     int
+	CompletedPages int
+}
+
+func crawl(ctx context.Context, apiKey, target string, maxPages int) (*crawlOutcome, error) {
 	hc := &http.Client{Timeout: 60 * time.Second}
 	jobID, err := submitCrawl(ctx, hc, apiKey, target, maxPages)
 	if err != nil {
@@ -117,7 +124,7 @@ func crawl(ctx context.Context, apiKey, target string, maxPages int) ([]pageResu
 		switch pr.Status {
 		case "completed":
 			fmt.Fprintf(os.Stderr, "frag: crawl %s complete: %d/%d pages\n", jobID, pr.CompletedPages, pr.TotalPages)
-			return pr.Results, nil
+			return &crawlOutcome{JobID: jobID, Pages: pr.Results, TotalPages: pr.TotalPages, CompletedPages: pr.CompletedPages}, nil
 		case "failed":
 			return nil, fmt.Errorf("anakin crawl job %s failed: %s", jobID, pr.Error)
 		case "pending", "processing":

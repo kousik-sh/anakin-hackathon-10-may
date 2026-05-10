@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const usage = `usage:
-  frag sync <url>     crawl URL via Anakin, diff chunks against last sync
-  frag export         write changed_chunks.jsonl from .frag-changes.json
+  frag sync [--no-normalize] <url>   crawl URL via Anakin, diff chunks against last sync
+  frag export                        write changed_chunks.jsonl from .frag-changes.json
 `
 
 func main() {
@@ -25,11 +29,16 @@ func main() {
 
 	switch os.Args[1] {
 	case "sync":
-		if len(os.Args) != 3 {
+		fs := flag.NewFlagSet("sync", flag.ExitOnError)
+		noNormalize := fs.Bool("no-normalize", false, "bypass cosmetic-noise normalization before hashing (debug)")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(2)
+		}
+		if fs.NArg() != 1 {
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)
 		}
-		if err := runSync(ctx, os.Args[2]); err != nil {
+		if err := runSync(ctx, fs.Arg(0), !*noNormalize); err != nil {
 			fmt.Fprintf(os.Stderr, "frag: %v\n", err)
 			os.Exit(1)
 		}
@@ -50,25 +59,27 @@ func main() {
 	}
 }
 
-func runSync(ctx context.Context, target string) error {
+func runSync(ctx context.Context, target string, useNormalize bool) error {
 	apiKey := os.Getenv("ANAKIN_API_KEY")
 	if apiKey == "" {
 		return fmt.Errorf("ANAKIN_API_KEY not set; export it before running sync (e.g. `export $(grep -v '^#' env | xargs)`)")
 	}
-	pages, err := crawl(ctx, apiKey, target, 20)
+	start := time.Now()
+	outcome, err := crawl(ctx, apiKey, target, 20)
+	duration := time.Since(start)
 	if err != nil {
 		return err
 	}
 
 	var current []StateChunk
 	usedPages := 0
-	for _, p := range pages {
+	for _, p := range outcome.Pages {
 		if p.Status != "completed" || p.Markdown == "" {
 			fmt.Fprintf(os.Stderr, "frag: skipping %s (status=%s, error=%s)\n", p.URL, p.Status, p.Error)
 			continue
 		}
 		usedPages++
-		current = append(current, chunksForPage(p.URL, p.Markdown)...)
+		current = append(current, chunksForPage(p.URL, p.Markdown, useNormalize)...)
 	}
 	if usedPages == 0 {
 		return fmt.Errorf("anakin returned no usable pages for %s", target)
@@ -78,6 +89,7 @@ func runSync(ctx context.Context, target string) error {
 	if err != nil {
 		return err
 	}
+	isFirst := prev == nil
 
 	now := time.Now().UTC()
 	changes := diff(prev, current, target, now)
@@ -90,9 +102,126 @@ func runSync(ctx context.Context, target string) error {
 		return err
 	}
 
+	printSummary(os.Stdout, target, outcome, duration, changes, isFirst)
 	fmt.Printf("%d added, %d modified, %d removed, %d unchanged\n",
 		len(changes.Added), len(changes.Modified), len(changes.Removed), changes.UnchangedCount)
 	return nil
+}
+
+const boxInner = 51
+
+func visibleLen(s string) int {
+	n := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+func boxLine(content string) string {
+	pad := boxInner - visibleLen(content)
+	if pad < 0 {
+		pad = 0
+	}
+	return "│" + content + strings.Repeat(" ", pad) + "│"
+}
+
+func boxTop(title string) string {
+	titleSeg := "─ " + title + " "
+	pad := boxInner - utf8.RuneCountInString(titleSeg)
+	if pad < 0 {
+		pad = 0
+	}
+	return "┌" + titleSeg + strings.Repeat("─", pad) + "┐"
+}
+
+func boxBottom() string {
+	return "└" + strings.Repeat("─", boxInner) + "┘"
+}
+
+func truncateURL(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	if max <= 1 {
+		return "…"
+	}
+	runes := []rune(s)
+	return string(runes[:max-1]) + "…"
+}
+
+func dot(isTTY bool, color string) string {
+	if !isTTY {
+		return "●"
+	}
+	return "\x1b[" + color + "m●\x1b[0m"
+}
+
+func printSummary(w io.Writer, target string, outcome *crawlOutcome, dur time.Duration, c Changes, isFirst bool) {
+	isTTY := false
+	if f, ok := w.(*os.File); ok {
+		if fi, err := f.Stat(); err == nil {
+			isTTY = (fi.Mode() & os.ModeCharDevice) != 0
+		}
+	}
+
+	urlLabel := " Source:  "
+	urlBudget := boxInner - utf8.RuneCountInString(urlLabel)
+	srcLine := urlLabel + truncateURL(target, urlBudget)
+
+	shortJob := outcome.JobID
+	if len(shortJob) > 8 {
+		shortJob = shortJob[:8]
+	}
+	pageTotal := outcome.TotalPages
+	if pageTotal == 0 {
+		pageTotal = len(outcome.Pages)
+	}
+	pageLine := fmt.Sprintf(" Pages:   %d/%d  (job %s, %s)", outcome.CompletedPages, pageTotal, shortJob, dur.Round(time.Second))
+
+	addedDot := dot(isTTY, "32")
+	modDot := dot(isTTY, "33")
+	remDot := dot(isTTY, "31")
+	unchDot := "○"
+	if isTTY {
+		unchDot = "\x1b[90m○\x1b[0m"
+	}
+
+	chunkTotal := len(c.Added) + len(c.Modified) + c.UnchangedCount
+
+	var headline string
+	switch {
+	case isFirst:
+		headline = fmt.Sprintf(" Baseline established: %d chunks tracked", chunkTotal)
+	case chunkTotal == 0:
+		headline = " Re-embed avoided: —"
+	default:
+		pct := 100.0 * float64(c.UnchangedCount) / float64(chunkTotal)
+		headline = fmt.Sprintf(" Re-embed avoided: %.1f%%  (%d of %d chunks)", pct, c.UnchangedCount, chunkTotal)
+	}
+
+	fmt.Fprintln(w, boxTop("frag sync"))
+	fmt.Fprintln(w, boxLine(srcLine))
+	fmt.Fprintln(w, boxLine(pageLine))
+	fmt.Fprintln(w, boxLine(""))
+	fmt.Fprintln(w, boxLine(fmt.Sprintf("   %s %-9s %3d", addedDot, "added", len(c.Added))))
+	fmt.Fprintln(w, boxLine(fmt.Sprintf("   %s %-9s %3d", modDot, "modified", len(c.Modified))))
+	fmt.Fprintln(w, boxLine(fmt.Sprintf("   %s %-9s %3d", remDot, "removed", len(c.Removed))))
+	fmt.Fprintln(w, boxLine(fmt.Sprintf("   %s %-9s %3d", unchDot, "unchanged", c.UnchangedCount)))
+	fmt.Fprintln(w, boxLine(""))
+	fmt.Fprintln(w, boxLine(headline))
+	fmt.Fprintln(w, boxBottom())
 }
 
 type jsonlLine struct {

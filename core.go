@@ -64,8 +64,42 @@ type Changes struct {
 
 var blankRunRE = regexp.MustCompile(`\n{3,}`)
 
-func normalize(md string) string {
+func normalizeMarkdown(md string) string {
 	return blankRunRE.ReplaceAllString(strings.TrimSpace(md), "\n\n")
+}
+
+var (
+	htmlCommentRE = regexp.MustCompile(`(?s)<!--.*?-->`)
+	dropLineREs   = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^\s*last updated[:\s]`),
+		regexp.MustCompile(`(?i)^\s*updated[:\s]+\d{4}-\d{2}-\d{2}`),
+		regexp.MustCompile(`(?i)^\s*updated\s+(on\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)`),
+		regexp.MustCompile(`^\s*©\s*\d{4}`),
+		regexp.MustCompile(`(?i)^\s*copyright\s+\d{4}`),
+		regexp.MustCompile(`(?i)^\s*generated\s+(on|at)\s+`),
+		regexp.MustCompile(`^\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}`),
+	}
+)
+
+func normalize(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = htmlCommentRE.ReplaceAllString(s, "")
+	lines := strings.Split(s, "\n")
+	kept := make([]string, 0, len(lines))
+lineLoop:
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		for _, re := range dropLineREs {
+			if re.MatchString(line) {
+				continue lineLoop
+			}
+		}
+		kept = append(kept, line)
+	}
+	s = strings.Join(kept, "\n")
+	s = blankRunRE.ReplaceAllString(s, "\n\n")
+	return strings.TrimSpace(s)
 }
 
 func chunkText(md string, size int) []string {
@@ -94,16 +128,20 @@ func textHash(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func chunksForPage(url, markdown string) []StateChunk {
-	pieces := chunkText(normalize(markdown), chunkWords)
+func chunksForPage(url, markdown string, useNormalize bool) []StateChunk {
+	pieces := chunkText(normalizeMarkdown(markdown), chunkWords)
 	out := make([]StateChunk, 0, len(pieces))
 	for i, p := range pieces {
+		hashIn := p
+		if useNormalize {
+			hashIn = normalize(p)
+		}
 		out = append(out, StateChunk{
 			ID:       chunkID(url, i),
 			URL:      url,
 			Index:    i,
 			Text:     p,
-			TextHash: textHash(p),
+			TextHash: textHash(hashIn),
 		})
 	}
 	return out
