@@ -1,0 +1,25 @@
+# secrets
+env
+
+# go build artifacts
+/frag
+
+# runtime state (rebuilt by `frag sync`)
+.frag-state.json
+.frag-changes.json
+changed_chunks.jsonl
+
+# python rag store + venv
+.rag-store.pkl
+.venv/
+__pycache__/
+*.pyc
+
+# bundled reference dump (also lives at ~/.claude/skills/anakin-api/)
+anakin-llms-full.txt
+
+# claude code local settings
+.claude/
+
+# scratch
+research.txt
